@@ -15,7 +15,6 @@ import math
 import torch.nn.functional as F
 from torch_utils import persistence
 from training.networks_stylegan2 import Generator as StyleGAN2Backbone
-from training.networks_siren import SPATIALSIRENBASELINE as SPATIALSIRENBASELINE
 from training.volumetric_rendering.renderer import ImportanceRenderer
 from training.volumetric_rendering.ray_sampler import RaySampler
 import dnnlib
