@@ -100,9 +100,9 @@ class ImportanceRenderer(torch.nn.Module):
         super().__init__()
         self.ray_marcher = MipRayMarcher2()
         self.plane_axes = generate_planes()
-        self.pe_networks = PE_MappingNetwork(z_dim=512, c_dim=60)
+        self.pe_networks = PE_MappingNetwork(z_dim=0, c_dim=60)
 
-    def forward(self, z, planes, decoder, ray_origins, ray_directions, rendering_options, deform_network=None, pe=False):
+    def forward(self, z, planes, decoder, ray_origins, ray_directions, rendering_options, coarse_coor=None, fine_coor=None, deform_network=None, pe=True, coor=False):
         self.plane_axes = self.plane_axes.to(ray_origins.device)
         self.deform_network = deform_network
         self.z = z
@@ -135,6 +135,9 @@ class ImportanceRenderer(torch.nn.Module):
             deform_coarse = self.pe_networks(z_pe, coarse_pe)
             sample_coordinates = sample_coordinates + deform_coarse
 
+        if coarse_coor is not None:
+            sample_coordinates = sample_coordinates + coarse_coor
+
         out = self.run_model(planes, decoder, sample_coordinates, sample_directions, rendering_options)
         colors_coarse = out['rgb']
         densities_coarse = out['sigma']
@@ -149,19 +152,22 @@ class ImportanceRenderer(torch.nn.Module):
             depths_fine = self.sample_importance(depths_coarse, weights, N_importance)
 
             sample_directions = ray_directions.unsqueeze(-2).expand(-1, -1, N_importance, -1).reshape(batch_size, -1, 3)
-            sample_coordinates = (ray_origins.unsqueeze(-2) + depths_fine * ray_directions.unsqueeze(-2)).reshape(batch_size, -1, 3)
+            fine_sample_coordinates = (ray_origins.unsqueeze(-2) + depths_fine * ray_directions.unsqueeze(-2)).reshape(batch_size, -1, 3)
 
             if deform_network is not None:
                 deform_fine = self.deform_network(sample_coordinates, z)
                 sample_coordinates = sample_coordinates + deform_fine
                 
             if pe==True:
-                fine_pe = positional_encoding(sample_coordinates, size=10)
-                z_pe = z.unsqueeze(dim = 1).expand(-1, fine_pe.shape[1] ,-1)
+                fine_pe = positional_encoding(fine_sample_coordinates, size=10) # fine_pe.shape=([4, 196608, 60])
+                z_pe = z.unsqueeze(dim = 1).expand(-1, fine_pe.shape[1] ,-1) # z_pe.shape=([4, 196608, 512])
                 deform_fine = self.pe_networks(z_pe, fine_pe)
-                sample_coordinates = sample_coordinates + deform_fine
+                fine_sample_coordinates = fine_sample_coordinates + deform_fine
 
-            out = self.run_model(planes, decoder, sample_coordinates, sample_directions, rendering_options)
+            if fine_coor is not None:
+                fine_sample_coordinates = fine_sample_coordinates + coarse_coor
+
+            out = self.run_model(planes, decoder, fine_sample_coordinates, sample_directions, rendering_options)
             colors_fine = out['rgb']
             densities_fine = out['sigma']
             colors_fine = colors_fine.reshape(batch_size, num_rays, N_importance, colors_fine.shape[-1])
@@ -174,9 +180,11 @@ class ImportanceRenderer(torch.nn.Module):
             rgb_final, depth_final, weights = self.ray_marcher(all_colors, all_densities, all_depths, rendering_options)
         else:
             rgb_final, depth_final, weights = self.ray_marcher(colors_coarse, densities_coarse, depths_coarse, rendering_options)
-
-
-        return rgb_final, depth_final, weights.sum(2)
+        
+        if coor==True:
+            return rgb_final, depth_final, weights.sum(2), deform_coarse, deform_fine
+        else:
+            return rgb_final, depth_final, weights.sum(2)
 
     def run_model(self, planes, decoder, sample_coordinates, sample_directions, options, z=None, deform_network=None):
         if deform_network is not None:
