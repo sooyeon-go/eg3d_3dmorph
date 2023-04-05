@@ -112,6 +112,7 @@ class FullyConnectedLayer(torch.nn.Module):
             self.weight = torch.nn.Parameter(torch.randn([out_features, in_features]) / lr_multiplier)
         else:
             self.weight = torch.nn.Parameter(torch.zeros([out_features, in_features]) / lr_multiplier)
+            #nn.init.xavier_normal_(self.weight)
         self.bias = torch.nn.Parameter(torch.full([out_features], np.float32(bias_init))) if bias else None
         self.weight_gain = lr_multiplier / np.sqrt(in_features)
         self.bias_gain = lr_multiplier
@@ -295,6 +296,8 @@ class PE_MappingNetwork(torch.nn.Module):
 
         in_features= z_dim + c_dim
         out_features= 3
+        if c_dim > 0:
+            self.embed = FullyConnectedLayer(60, 60)
 
         features_list=[in_features, 512, out_features]
 
@@ -307,16 +310,18 @@ class PE_MappingNetwork(torch.nn.Module):
     def forward(self, z, c):
         # Embed, normalize, and concat inputs.
         x = None
+        batch = z.shape[0]
+        num_points = z.shape[1]
         with torch.autograd.profiler.record_function('input'):
             if self.z_dim > 0:
                 x = normalize_2nd_moment(z.to(torch.float32))
+                x = x.reshape(batch * num_points, -1)
             if self.c_dim > 0:
-                y = normalize_2nd_moment(c.to(torch.float32))
-                x = torch.cat([x, y], dim=2) 
+                c = c.reshape(batch * num_points, -1)
+                y = normalize_2nd_moment(self.embed(c.to(torch.float32)))
+                #x = torch.cat([x, y], dim=1) 
+                x=y
 
-        batch = x.shape[0]
-        num_points = x.shape[1]
-        x = x.reshape(batch * num_points, -1)
         # Main layers.
         for idx in range(2):
             layer = getattr(self, f'deform{idx}')
