@@ -94,7 +94,22 @@ def save_image_grid(img, fname, drange, grid_size):
 
 def gen_sample_using_conditioning_params(G_ema, conditioning_params, z, c, truncation_psi=1, truncation_cutoff=None, neural_rendering_resolution=None, update_emas=False, cache_backbone=False, use_cached_backbone=False, pe=True, **synthesis_kwargs):
     ws = G_ema.mapping(z, conditioning_params, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, update_emas=update_emas)
-    return G_ema.synthesis(z, ws, c, update_emas=update_emas, neural_rendering_resolution=neural_rendering_resolution, cache_backbone=cache_backbone, use_cached_backbone=use_cached_backbone, pe=pe, **synthesis_kwargs)
+    return G_ema.synthesis(z, ws, c, update_emas=update_emas, neural_rendering_resolution=neural_rendering_resolution, cache_backbone=cache_backbone, use_cached_backbone=use_cached_backbone, pe=True, **synthesis_kwargs)
+
+#----------------------------------------------------------------------------
+
+def requires_grad(model, flag=True):
+    for p in model.parameters():
+        p.requires_grad = flag
+
+#----------------------------------------------------------------------------
+
+def warping_requires_grad(model, flag=True):
+    for n, p in model.named_parameters():
+        if (('renderer' in n) or ('decoder' in n)) and ('ema' not in n):
+            p.requires_grad = flag
+        else:
+            p.requires_grad = False
 
 #----------------------------------------------------------------------------
 
@@ -215,9 +230,10 @@ def training_loop(
             opt_kwargs = dnnlib.EasyDict(opt_kwargs)
             opt_kwargs.lr = opt_kwargs.lr * mb_ratio
             opt_kwargs.betas = [beta ** mb_ratio for beta in opt_kwargs.betas]
-            #opt = dnnlib.util.construct_class_by_name(module.parameters(), **opt_kwargs) # subclass of torch.optim.Optimizer
             if name=='G':
-                opt = dnnlib.util.construct_class_by_name(params=list(module.renderer.parameters())+list(module.decoder.parameters()), **opt_kwargs) # subclass of torch.optim.Optimizer
+                #opt = dnnlib.util.construct_class_by_name(params=list(module.renderer.parameters())+list(module.decoder.parameters()), **opt_kwargs) # subclass of torch.optim.Optimizer
+                opt = dnnlib.util.construct_class_by_name(params=list(module.renderer.parameters()), **opt_kwargs) # subclass of torch.optim.Optimizer
+                #opt = dnnlib.util.construct_class_by_name(params=list(module.backbone.synthesis.parameters()), **opt_kwargs)
             else:
                 opt = dnnlib.util.construct_class_by_name(module.parameters(), **opt_kwargs) # subclass of torch.optim.Optimizer
             phases += [dnnlib.EasyDict(name=name+'main', module=module, opt=opt, interval=1)]
@@ -278,8 +294,19 @@ def training_loop(
     batch_idx = 0
     if progress_fn is not None:
         progress_fn(0, total_kimg)
-    while True:
 
+    # overfitting 
+    overfit_z = torch.randn([1, G.z_dim], device=device)
+    overfit_real_img, overfit_real_c = next(training_set_iterator)
+    overfit_real_img = (overfit_real_img.to(device).to(torch.float32) / 127.5 - 1)
+    overfit_real_img = overfit_real_img[0].unsqueeze(dim=0)
+    overfit_real_c = overfit_real_c[0].unsqueeze(dim=0).to(device)
+
+    overfit_z=overfit_z.repeat(4,1)
+    overfit_real_img=overfit_real_img.repeat(4,1,1,1)
+    overfit_real_c=overfit_real_c.repeat(4,1)
+
+    while True:
         # Fetch training data.
         with torch.autograd.profiler.record_function('data_fetch'):
             phase_real_img, phase_real_c = next(training_set_iterator)
@@ -300,17 +327,19 @@ def training_loop(
             
             # Accumulate gradients.
             phase.opt.zero_grad(set_to_none=True)
+            """
             if phase.name in ['Gmain', 'Gboth', 'Greg']:
                 #import pdb; pdb.set_trace()
                 phase.module.requires_grad_(False)
                 phase.module.renderer.requires_grad_(True)
                 phase.module.decoder.requires_grad_(True)
-            else:
+            elif phase.name in ['Dmain', 'Dboth', 'Dreg']:
                 phase.module.requires_grad_(True)
-            
-            # phase.module.requires_grad_(False)
+            """
+            phase.module.requires_grad_(True)
             for real_img, real_c, gen_z, gen_c in zip(phase_real_img, phase_real_c, phase_gen_z, phase_gen_c):
-                loss.accumulate_gradients(phase=phase.name, real_img=real_img, real_c=real_c, gen_z=gen_z, gen_c=gen_c, gain=phase.interval, cur_nimg=cur_nimg)
+                loss.accumulate_gradients(phase=phase.name, real_img=real_img, real_c=real_c, gen_z=gen_z, gen_c=gen_c, conditioning_params=conditioning_params, gain=phase.interval, cur_nimg=cur_nimg, 
+                                          overfit_z=overfit_z, overfit_real_img=overfit_real_img)
             phase.module.requires_grad_(False)
 
             # Update weights.
@@ -388,17 +417,19 @@ def training_loop(
         # Save image snapshot.
         if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
             #out = [G_ema(z=z, c=c, noise_mode='const') for z, c in zip(grid_z, grid_c)]
-            nodeform_out = [gen_sample_using_conditioning_params(G_ema, conditioning_params, z, c, noise_mode='const', pe=False) for z, c in zip(grid_z, grid_c)]
+            #nodeform_out = [gen_sample_using_conditioning_params(G_ema, conditioning_params, z, c, noise_mode='const', pe=False) for z, c in zip(grid_z, grid_c)]
+            overfit_out = [gen_sample_using_conditioning_params(G_ema, conditioning_params, overfit_z, c, noise_mode='const') for z, c in zip(grid_z, grid_c)]
             out = [gen_sample_using_conditioning_params(G_ema, conditioning_params, z, c, noise_mode='const') for z, c in zip(grid_z, grid_c)]
             images = torch.cat([o['image'].cpu() for o in out]).numpy()
+            overfit_images_raw = torch.cat([o['image_raw'].cpu() for o in overfit_out]).numpy()
             images_raw = torch.cat([o['image_raw'].cpu() for o in out]).numpy()
-            no_deform_images_raw = torch.cat([o['image_raw'].cpu() for o in nodeform_out]).numpy()
+            #no_deform_images_raw = torch.cat([o['image_raw'].cpu() for o in nodeform_out]).numpy()
             images_depth = -torch.cat([o['image_depth'].cpu() for o in out]).numpy()
             save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
+            save_image_grid(overfit_images_raw, os.path.join(run_dir, f'overfit_fakes{cur_nimg//1000:06d}_raw.png'), drange=[-1,1], grid_size=grid_size)
             save_image_grid(images_raw, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_raw.png'), drange=[-1,1], grid_size=grid_size)
-            save_image_grid(no_deform_images_raw, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_nodeformraw.png'), drange=[-1,1], grid_size=grid_size)
+            #save_image_grid(no_deform_images_raw, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_nodeformraw.png'), drange=[-1,1], grid_size=grid_size)
             save_image_grid(images_depth, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_depth.png'), drange=[images_depth.min(), images_depth.max()], grid_size=grid_size)
-
             #--------------------
             # # Log forward-conditioned images
 
