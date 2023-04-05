@@ -78,7 +78,7 @@ class TriPlaneGenerator(torch.nn.Module):
         # Reshape output into three 32-channel planes
         planes = planes.view(len(planes), 3, 32, planes.shape[-2], planes.shape[-1])
         # Perform volume rendering
-        feature_samples, depth_samples, weights_samples = self.renderer(z, planes, self.decoder, ray_origins, ray_directions, self.rendering_kwargs, pe=pe) # channels last
+        feature_samples, depth_samples, weights_samples, deform_coarse, deform_fine = self.renderer(z, planes, self.decoder, ray_origins, ray_directions, self.rendering_kwargs, pe=True, coor=True) # channels last
 
         # Reshape into 'raw' neural-rendered image
         H = W = self.neural_rendering_resolution
@@ -89,7 +89,7 @@ class TriPlaneGenerator(torch.nn.Module):
         rgb_image = feature_image[:, :3]
         sr_image = self.superresolution(rgb_image, feature_image, ws, noise_mode=self.rendering_kwargs['superresolution_noise_mode'], **{k:synthesis_kwargs[k] for k in synthesis_kwargs.keys() if k != 'noise_mode'})
 
-        return {'image': sr_image, 'image_raw': rgb_image, 'image_depth': depth_image}
+        return {'image': sr_image, 'image_raw': rgb_image, 'image_depth': depth_image, 'deform_coarse': deform_coarse, 'deform_fine': deform_fine}
     
     def sample(self, coordinates, directions, z, c, truncation_psi=1, truncation_cutoff=None, update_emas=False, **synthesis_kwargs):
         # Compute RGB features, density for arbitrary 3D coordinates. Mostly used for extracting shapes. 
